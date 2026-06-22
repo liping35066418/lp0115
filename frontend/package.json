@@ -1,0 +1,20 @@
+{
+  "name": "3d-render-ai-frontend",
+  "version": "1.0.0",
+  "description": "3D渲染参数AI推演引擎 - 3915端口配置界面",
+  "scripts": {
+    "dev": "vite --port 3915",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.1.0",
+    "axios": "^1.5.0",
+    "element-plus": "^2.3.12",
+    "vue": "^3.3.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^4.3.4",
+    "vite": "^4.4.9"
+  }
+}
