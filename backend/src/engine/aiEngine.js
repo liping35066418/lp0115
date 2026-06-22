@@ -5,9 +5,57 @@ const { renderParamTemplates } = require('../data/renderParams');
 
 const MAX_RENDER_LOAD_THRESHOLD = 80;
 
-function calculateMaterialScore(material, sceneInfo, renderParams) {
+const BASELINE_PARAMS = {
+  resolution: { width: 1920, height: 1080 },
+  samples: 256,
+  maxBounces: 4,
+  motionBlur: false,
+  depthOfField: false,
+  sceneSize: 100
+};
+
+function calculateDynamicLoadMultiplier(renderParams, sceneInfo) {
+  const res = renderParams.resolution || BASELINE_PARAMS.resolution;
+  const baselineArea = BASELINE_PARAMS.resolution.width * BASELINE_PARAMS.resolution.height;
+  const currentArea = res.width * res.height;
+  const areaRatio = currentArea / baselineArea;
+
+  const samplesRatio = (renderParams.samples || BASELINE_PARAMS.samples) / BASELINE_PARAMS.samples;
+  const bouncesRatio = (renderParams.maxBounces || BASELINE_PARAMS.maxBounces) / BASELINE_PARAMS.maxBounces;
+
+  let motionBlurFactor = 1;
+  if (renderParams.motionBlur) {
+    motionBlurFactor = 1.4;
+  }
+
+  let dofFactor = 1;
+  if (renderParams.depthOfField) {
+    dofFactor = 1.35;
+  }
+
+  const sceneSize = sceneInfo && sceneInfo.sceneSize ? sceneInfo.sceneSize : BASELINE_PARAMS.sceneSize;
+  const sizeRatio = sceneSize / BASELINE_PARAMS.sceneSize;
+  const sceneSizeFactor = Math.pow(sizeRatio, 0.7);
+
+  const multiplier = areaRatio * samplesRatio * bouncesRatio * motionBlurFactor * dofFactor * sceneSizeFactor;
+
+  return {
+    multiplier,
+    breakdown: {
+      areaRatio,
+      samplesRatio,
+      bouncesRatio,
+      motionBlurFactor,
+      dofFactor,
+      sceneSizeFactor
+    }
+  };
+}
+
+function calculateMaterialScore(material, sceneInfo, renderParams, dynamicMultiplier) {
   let score = 0;
   let reasons = [];
+  const multiplier = (dynamicMultiplier && dynamicMultiplier.multiplier) || 1;
 
   if (material.compatibleStyles.includes(sceneInfo.style)) {
     score += 40;
@@ -33,9 +81,19 @@ function calculateMaterialScore(material, sceneInfo, renderParams) {
       score += sizeFactor * 15;
       reasons.push('大场景适配');
     }
+    if (material.type === 'grass' || material.type === 'water' || material.type === 'concrete') {
+      if (sceneInfo.sceneSize > 500) {
+        score -= 20;
+        reasons.push('大场景材质渲染压力');
+      }
+      if (sceneInfo.sceneSize > 2000) {
+        score -= 30;
+        reasons.push('超大场景重负载');
+      }
+    }
   }
 
-  const effectiveLoad = material.renderLoad * (renderParams.renderLoadMultiplier || 1);
+  const effectiveLoad = material.renderLoad * multiplier;
   if (effectiveLoad <= MAX_RENDER_LOAD_THRESHOLD) {
     score += 20;
     reasons.push('渲染负载合规');
@@ -63,9 +121,10 @@ function calculateMaterialScore(material, sceneInfo, renderParams) {
   };
 }
 
-function calculateLightingScore(lighting, sceneInfo, renderParams) {
+function calculateLightingScore(lighting, sceneInfo, renderParams, dynamicMultiplier) {
   let score = 0;
   let reasons = [];
+  const multiplier = (dynamicMultiplier && dynamicMultiplier.multiplier) || 1;
 
   if (lighting.style === sceneInfo.style) {
     score += 40;
@@ -91,7 +150,18 @@ function calculateLightingScore(lighting, sceneInfo, renderParams) {
     reasons.push('光源数量优化');
   }
 
-  const effectiveLoad = lighting.renderLoad * (renderParams.renderLoadMultiplier || 1);
+  if (sceneInfo.sceneSize) {
+    if (sceneInfo.sceneSize > 1000 && lightCount > 3) {
+      score -= 25;
+      reasons.push('大场景多光源开销大');
+    }
+    if (sceneInfo.sceneSize > 3000) {
+      score -= 20;
+      reasons.push('超大场景光照采样压力');
+    }
+  }
+
+  const effectiveLoad = lighting.renderLoad * multiplier;
   if (effectiveLoad <= MAX_RENDER_LOAD_THRESHOLD) {
     score += 15;
     reasons.push('渲染负载合规');
@@ -115,22 +185,24 @@ function calculateLightingScore(lighting, sceneInfo, renderParams) {
 }
 
 function generateParameterCombinations(sceneInfo, renderParams) {
+  const dynamicMultiplier = calculateDynamicLoadMultiplier(renderParams, sceneInfo);
+
   const materialResults = materials
-    .map(m => calculateMaterialScore(m, sceneInfo, renderParams))
+    .map(m => calculateMaterialScore(m, sceneInfo, renderParams, dynamicMultiplier))
     .filter(r => r.isRecommended)
     .sort((a, b) => b.score - a.score);
 
   const lightingResults = lightingPresets
-    .map(l => calculateLightingScore(l, sceneInfo, renderParams))
+    .map(l => calculateLightingScore(l, sceneInfo, renderParams, dynamicMultiplier))
     .filter(r => r.isRecommended)
     .sort((a, b) => b.score - a.score);
 
   const rejectedMaterials = materials
-    .map(m => calculateMaterialScore(m, sceneInfo, renderParams))
+    .map(m => calculateMaterialScore(m, sceneInfo, renderParams, dynamicMultiplier))
     .filter(r => !r.isRecommended);
 
   const rejectedLighting = lightingPresets
-    .map(l => calculateLightingScore(l, sceneInfo, renderParams))
+    .map(l => calculateLightingScore(l, sceneInfo, renderParams, dynamicMultiplier))
     .filter(r => !r.isRecommended);
 
   const combinations = [];
@@ -163,6 +235,7 @@ function generateParameterCombinations(sceneInfo, renderParams) {
   return {
     recommended: combinations.slice(0, 6),
     alternatives: combinations.slice(6),
+    loadMultiplierInfo: dynamicMultiplier,
     statistics: {
       totalMaterialsScanned: materials.length,
       totalLightingScanned: lightingPresets.length,
@@ -209,8 +282,12 @@ function validateSceneAttributes(sceneInfo) {
   if (sceneInfo.sceneSize !== undefined) {
     if (sceneInfo.sceneSize <= 0) {
       errors.push('场景尺寸必须大于0');
-    } else if (sceneInfo.sceneSize > 10000) {
-      warnings.push('场景尺寸过大，可能影响渲染性能');
+    } else if (sceneInfo.sceneSize > 3000) {
+      warnings.push(`超大场景警告：当前 ${sceneInfo.sceneSize}㎡，几何与纹理开销剧增，建议精简材质或降低精度参数`);
+    } else if (sceneInfo.sceneSize > 1000) {
+      warnings.push(`大场景提示：当前 ${sceneInfo.sceneSize}㎡，渲染负载明显上升，注意观察推荐方案剔除情况`);
+    } else if (sceneInfo.sceneSize > 500) {
+      warnings.push(`场景尺寸较大：当前 ${sceneInfo.sceneSize}㎡，建议结合负载情况选择材质`);
     }
   }
 
@@ -227,31 +304,37 @@ function validateSceneAttributes(sceneInfo) {
 
 function rescreenOnParamChange(oldParams, newParams, sceneInfo) {
   const changes = [];
-  
+
   if (oldParams.resolution && newParams.resolution &&
       (oldParams.resolution.width !== newParams.resolution.width ||
        oldParams.resolution.height !== newParams.resolution.height)) {
     changes.push('分辨率');
   }
-  
+
   if (oldParams.samples !== newParams.samples) {
     changes.push('采样数');
   }
-  
+
   if (oldParams.maxBounces !== newParams.maxBounces) {
     changes.push('光线反弹次数');
   }
-  
+
+  if (!!oldParams.motionBlur !== !!newParams.motionBlur) {
+    changes.push('运动模糊');
+  }
+
+  if (!!oldParams.depthOfField !== !!newParams.depthOfField) {
+    changes.push('景深效果');
+  }
+
   const qualityChanged = changes.length > 0;
-  
+
   if (qualityChanged) {
-    const areaRatio = (newParams.resolution.width * newParams.resolution.height) / 
-                      (oldParams.resolution.width * oldParams.resolution.height);
-    const samplesRatio = newParams.samples / oldParams.samples;
-    const bouncesRatio = newParams.maxBounces / oldParams.maxBounces;
-    
-    const loadMultiplier = areaRatio * samplesRatio * bouncesRatio;
-    
+    const oldMult = calculateDynamicLoadMultiplier(oldParams, sceneInfo).multiplier;
+    const newMult = calculateDynamicLoadMultiplier(newParams, sceneInfo).multiplier;
+
+    const loadMultiplier = newMult / oldMult;
+
     return {
       needsRescreen: true,
       changes,
@@ -259,7 +342,7 @@ function rescreenOnParamChange(oldParams, newParams, sceneInfo) {
       estimatedLoadChange: ((loadMultiplier - 1) * 100).toFixed(1) + '%'
     };
   }
-  
+
   return {
     needsRescreen: false,
     changes: []
@@ -272,5 +355,6 @@ module.exports = {
   generateParameterCombinations,
   validateSceneAttributes,
   rescreenOnParamChange,
+  calculateDynamicLoadMultiplier,
   MAX_RENDER_LOAD_THRESHOLD
 };

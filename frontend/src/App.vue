@@ -90,7 +90,12 @@ onMounted(async () => {
 })
 
 function onSceneChange(info) {
+  const prevSize = sceneInfo.value.sceneSize
+  const sizeChanged = prevSize !== undefined && info.sceneSize !== prevSize
   sceneInfo.value = info
+  if ((sizeChanged || sceneInfo.value._forceRescreen) && recommendResult.value) {
+    fetchRecommendation()
+  }
 }
 
 function onRenderParamsChange(params, needsRescreen) {
