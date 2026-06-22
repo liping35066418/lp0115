@@ -52,6 +52,9 @@
           />
         </el-col>
       </el-row>
+
+      <el-divider content-position="left">组件兼容性检测</el-divider>
+      <ComponentCompatibilityCheck />
     </main>
 
     <footer class="app-footer">
@@ -67,6 +70,7 @@ import SceneInput from './components/SceneInput.vue'
 import RenderParams from './components/RenderParams.vue'
 import RecommendResult from './components/RecommendResult.vue'
 import QuickTest from './components/QuickTest.vue'
+import ComponentCompatibilityCheck from './components/ComponentCompatibilityCheck.vue'
 
 const sceneInfo = ref({})
 const renderParams = ref({})
